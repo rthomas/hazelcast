@@ -45,12 +45,18 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
     private final long MAX_NO_HEARTBEAT_MILLIS;
 
     private final long HEARTBEAT_INTERVAL_MILLIS;
+    
+    private final long MAX_NO_MASTER_CONFIRMATION_MILLIS;
+    
+    private final long MASTER_CONFIRMATION_INTERVAL_MILLIS;
 
     private final boolean ICMP_ENABLED;
 
     private final int ICMP_TTL;
 
     private final int ICMP_TIMEOUT;
+    
+    private final long MEMBER_LIST_PUBLISH_INTERVAL_MILLIS;
 
     private final Set<ScheduledAction> setScheduledActions = new LinkedHashSet<ScheduledAction>(1000);
 
@@ -63,16 +69,22 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
     private long firstJoinRequest = 0;
 
     private long lastHeartbeat = 0;
+    
+    private long lastMasterConfirmation = 0;
+    
+    private long lastMemberListPublish = 0;
 
-    final ILogger securityLogger;
-
+    private final Map<MemberImpl, Long> memberMasterConfirmationTimes = new HashMap<MemberImpl, Long>();
+    
     public ClusterManager(final Node node) {
         super(node);
-        securityLogger = node.loggingService.getLogger("com.hazelcast.security");
         WAIT_MILLIS_BEFORE_JOIN = node.groupProperties.WAIT_SECONDS_BEFORE_JOIN.getInteger() * 1000L;
         MAX_WAIT_SECONDS_BEFORE_JOIN = node.groupProperties.MAX_WAIT_SECONDS_BEFORE_JOIN.getInteger();
         MAX_NO_HEARTBEAT_MILLIS = node.groupProperties.MAX_NO_HEARTBEAT_SECONDS.getInteger() * 1000L;
         HEARTBEAT_INTERVAL_MILLIS = node.groupProperties.HEARTBEAT_INTERVAL_SECONDS.getInteger() * 1000L;
+        MAX_NO_MASTER_CONFIRMATION_MILLIS = node.groupProperties.MAX_NO_MASTER_CONFIRMATION_SECONDS.getInteger() * 1000L;
+        MASTER_CONFIRMATION_INTERVAL_MILLIS = node.groupProperties.MASTER_CONFIRMATION_INTERVAL_SECONDS.getInteger() * 1000L;
+        MEMBER_LIST_PUBLISH_INTERVAL_MILLIS = node.groupProperties.MEMBER_LIST_PUBLISH_INTERVAL_SECONDS.getInteger() * 1000L;
         ICMP_ENABLED = node.groupProperties.ICMP_ENABLED.getBoolean();
         ICMP_TTL = node.groupProperties.ICMP_TTL.getInteger();
         ICMP_TIMEOUT = node.groupProperties.ICMP_TIMEOUT.getInteger();
@@ -83,6 +95,14 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
                 if (now - lastHeartbeat >= HEARTBEAT_INTERVAL_MILLIS) {
                     heartBeater();
                     lastHeartbeat = now;
+                }
+                if (now - lastMasterConfirmation >= MASTER_CONFIRMATION_INTERVAL_MILLIS) {
+                    sendMasterConfirmation();
+                    lastMasterConfirmation = now;
+                }
+                if (now - lastMemberListPublish >= MEMBER_LIST_PUBLISH_INTERVAL_MILLIS) {
+                    sendMemberListToOthers();
+                    lastMemberListPublish = now;
                 }
             }
         });
@@ -265,13 +285,23 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
                                 if (lsDeadAddresses == null) {
                                     lsDeadAddresses = new ArrayList<Address>();
                                 }
-                                logger.log(Level.WARNING, "Added " + address + " to list of dead addresses because of timeout since last read");
+                                logger.log(Level.WARNING, "Added " + address
+                                                          + " to list of dead addresses because of timeout since last read");
                                 lsDeadAddresses.add(address);
                             } else if ((now - memberImpl.getLastRead()) >= 5000 && (now - memberImpl.getLastPing()) >= 5000) {
                                 ping(memberImpl);
                             }
                             if ((now - memberImpl.getLastWrite()) > 500) {
                                 sendHeartbeat(conn);
+                            }
+                            Long lastConfirmation = memberMasterConfirmationTimes.get(memberImpl);
+                            if (lastConfirmation == null || (now - lastConfirmation > MAX_NO_MASTER_CONFIRMATION_MILLIS)) {
+                                if (lsDeadAddresses == null) {
+                                    lsDeadAddresses = new ArrayList<Address>();
+                                }
+                                logger.log(Level.WARNING, "Added " + address
+                                                          + " to list of dead addresses because it has not sent a master confirmation recently");
+                                lsDeadAddresses.add(address);
                             }
                         } else if (conn == null && (now - memberImpl.getLastRead()) > 5000) {
                             logMissingConnection(address);
@@ -315,9 +345,58 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
                     if (conn != null) {
                         sendHeartbeat(conn);
                     } else {
-                        logger.log(Level.FINEST, "could not connect to " + address + " to send heartbeat");
+                        logger.log(Level.FINEST, "Could not connect to " + address + " to send heartbeat");
                     }
                 }
+            }
+        }
+    }
+    
+    private void sendMasterConfirmation() {
+        if (!node.joined() || !node.isActive() || isMaster()) {
+            return;
+        }
+        
+        final Address masterAddress = getMasterAddress();
+        if (masterAddress == null) {
+            logger.log(Level.FINEST, "Could not send MasterConfirmation, master is null!");
+            return;
+        }
+        
+        final MemberImpl masterMember = getMember(masterAddress);
+        if (masterMember == null) {
+            logger.log(Level.FINEST, "Could not send MasterConfirmation, master is null!");
+            return;
+        }
+        if (logger.isLoggable(Level.FINEST)) {
+            logger.log(Level.FINEST, "Sending MasterConfirmation to " + masterMember);
+        }
+        sendProcessableTo(new MasterConfirmation(), masterAddress);
+    }
+
+    public static class MasterConfirmation extends AbstractRemotelyProcessable {
+
+        public void process() {
+            final Address endPoint = conn.getEndPoint();
+            if (endPoint == null) {
+                return;
+            }
+            final ILogger logger = node.getLogger(MasterConfirmation.class.getName());
+            final ClusterManager clusterManager = node.clusterManager;
+            final MemberImpl member = clusterManager.getMember(endPoint);
+            if (member != null) {
+                if (getNode().isMaster()) {
+                    if (logger.isLoggable(Level.FINEST)) {
+                        logger.log(Level.FINEST, "MasterConfirmation has been received from " + member);
+                    }
+                    clusterManager.memberMasterConfirmationTimes.put(member, Clock.currentTimeMillis());
+                } else {
+                    logger.log(Level.WARNING, endPoint + " has sent MasterConfirmation, but this node is not master!");
+                }
+            } else {
+                logger.log(Level.WARNING, "MasterConfirmation has been received from " + endPoint
+                          + ", but it is not a member of this cluster!");
+                clusterManager.sendProcessableTo(new MemberRemover(clusterManager.thisAddress), conn);
             }
         }
     }
@@ -359,7 +438,7 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
         Packet packet = obtainPacket("heartbeat", null, null, ClusterOperation.HEARTBEAT, 0);
         sendOrReleasePacket(packet, conn);
     }
-
+    
     private void sendRemoveMemberToOthers(final Address deadAddress) {
         for (MemberImpl member : lsMembers) {
             Address address = member.getAddress();
@@ -367,6 +446,22 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
                 sendProcessableTo(new MemberRemover(deadAddress), address);
             }
         }
+    }
+    
+    // Will be called just before this node becomes the master
+    private void resetMemberMasterConfirmations() {
+        checkServiceThread();
+        for (MemberImpl member : lsMembers) {
+            memberMasterConfirmationTimes.put(member, Clock.currentTimeMillis());
+        }
+    }
+    
+    private void sendMemberListToOthers() {
+        checkServiceThread();
+        if (!isMaster()) {
+            return;
+        }
+        sendProcessableToAll(new MembersUpdateCall(lsMembers, node.getClusterImpl().getClusterTime()), false);
     }
     
     public void sendClusterMergeToOthers(final Address newTargetAddress) {
@@ -433,6 +528,7 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
         }
         if (isMaster()) {
             setJoins.remove(new MemberInfo(deadAddress));
+            resetMemberMasterConfirmations();
         }
         final Connection conn = node.connectionManager.getConnection(deadAddress);
         if (destroyConnection && conn != null) {
@@ -481,6 +577,11 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
                 if (joinRequest.getUuid().equals(member.getUuid())) {
                     String message = "Ignoring join request, member already exists.. => " + joinRequest;
                     logger.log(Level.FINEST, message);
+
+                    // send members update back to node trying to join again...
+                    final long clusterTime = node.getClusterImpl().getClusterTime();
+                    sendProcessableTo(new MembersUpdateCall(lsMembers, clusterTime), conn);
+                    sendProcessableTo(new SyncProcess(), conn);
                     return;
                 }
                 // If this node is master then remove old member and process join request.
@@ -505,6 +606,7 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
             if (isMaster() && node.joined() && node.isActive()) {
                 final MemberInfo newMemberInfo = new MemberInfo(joinRequest.address, joinRequest.nodeType, joinRequest.getUuid());
                 if (node.securityContext != null && !setJoins.contains(newMemberInfo)) {
+                    final ILogger securityLogger = node.loggingService.getLogger("com.hazelcast.security");
                     final Credentials cr = joinRequest.getCredentials();
                     if (cr == null) {
                         securityLogger.log(Level.SEVERE, "Expecting security credentials " +
@@ -594,6 +696,7 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
                 lsMembers.clear();
                 mapMembers.clear();
                 dataMemberCount.reset();
+                memberMasterConfirmationTimes.clear();
             }
         }, 5);
     }
@@ -691,7 +794,7 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
         List<AsyncRemotelyBooleanOp> calls = new ArrayList<AsyncRemotelyBooleanOp>();
         for (Member m : members) {
             MemberImpl member = (MemberImpl) m;
-            if (!member.localMember() && !member.isLiteMember()) {
+            if (!member.localMember()) {
                 AsyncRemotelyBooleanOp op = new AsyncRemotelyBooleanOp(
                         new FinalizeJoin(), member.getAddress(), false);
                 op.execute();
@@ -760,14 +863,30 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
 
     void updateMembers(Collection<MemberInfo> lsMemberInfos) {
         checkServiceThread();
-        logger.log(Level.FINEST, "Updating Members");
-        Map<Address, MemberImpl> mapOldMembers = new HashMap<Address, MemberImpl>();
+        final Map<Address, MemberImpl> mapOldMembers = new HashMap<Address, MemberImpl>();
         for (MemberImpl member : lsMembers) {
             mapOldMembers.put(member.getAddress(), member);
         }
+        if (mapOldMembers.size() == lsMemberInfos.size()) {
+            boolean same = true;
+            for (MemberInfo memberInfo : lsMemberInfos) {
+                MemberImpl member = mapOldMembers.get(memberInfo.getAddress());
+                if (member == null || !member.getUuid().equals(memberInfo.uuid)) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) {
+                logger.log(Level.FINEST, "No need to process member update...");
+                return;
+            }
+        }
+
+        logger.log(Level.FINEST, "Updating Members");
         lsMembers.clear();
         dataMemberCount.reset();
         mapMembers.clear();
+        memberMasterConfirmationTimes.clear();
         for (MemberInfo memberInfo : lsMemberInfos) {
             MemberImpl member = mapOldMembers.get(memberInfo.address);
             if (member == null) {
@@ -877,6 +996,9 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
                 dataMemberCount.increment();
             }
         }
+       
+        memberMasterConfirmationTimes.put(member, Clock.currentTimeMillis());
+        
         return member;
     }
 
@@ -885,6 +1007,7 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
         logger.log(Level.FINEST, "ClusterManager removing  " + member);
         mapMembers.remove(member.getAddress());
         lsMembers.remove(member);
+        memberMasterConfirmationTimes.remove(member);
         if (!member.isLiteMember()) {
             dataMemberCount.decrement();
         }
@@ -930,6 +1053,9 @@ public final class ClusterManager extends BaseManager implements ConnectionListe
         }
         if (mapCalls != null) {
             mapCalls.clear();
+        }
+        if (memberMasterConfirmationTimes != null) {
+            memberMasterConfirmationTimes.clear();
         }
     }
 }

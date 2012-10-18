@@ -214,26 +214,30 @@ public class PartitionManager {
                     ? cmap.getTotalBackupCount() == replicaIndex
                     : cmap.getTotalBackupCount() >= replicaIndex;
             if (includeCMap) {
-                for (Record rec : cmap.mapRecords.values()) {
-                    if (rec.isActive() && rec.isValid(now)) {
-                        if (rec.getKeyData() == null || rec.getKeyData().size() == 0) {
-                            throw new RuntimeException("Record.key is null or empty " + rec.getKeyData());
+                for (final Record record : cmap.mapRecords.values()) {
+                    if (record.isActive() && record.isValid(now)) {
+                        if (record.getKeyData() == null || record.getKeyData().size() == 0) {
+                            throw new RuntimeException("Record.key is null or empty " + record.getKeyData());
                         }
-                        if (rec.getBlockId() == partitionId) {
-                            cmap.onMigrate(rec);
+                        if (record.getBlockId() == partitionId) {
+                            concurrentMapManager.enqueueAndWait(new Processable() {
+                                public void process() {
+                                    cmap.onMigrate(record);
+                                }
+                            });
                             if (cmap.isMultiMap()) {
-                                final Collection<ValueHolder> colValues = rec.getMultiValues();
+                                final Collection<ValueHolder> colValues = record.getMultiValues();
                                 if (colValues != null) {
                                     for (ValueHolder valueHolder : colValues) {
-                                        Record record = rec.copy();
-                                        record.setValueData(valueHolder.getData());
-                                        lsResultSet.add(record);
+                                        Record copy = record.copy();
+                                        copy.setValueData(valueHolder.getData());
+                                        lsResultSet.add(copy);
                                     }
                                 }
                             } else {
-                                lsResultSet.add(rec);
+                                lsResultSet.add(record);
                             }
-                            lsResultSet.addCost(rec.getCost());
+                            lsResultSet.addCost(record.getCost());
                         }
                     }
                 }
@@ -922,15 +926,15 @@ public class PartitionManager {
                         try {
                             result = future.get(partitionMigrationTimeout, TimeUnit.SECONDS);
                         } catch (Throwable e) {
-                            logger.log(Level.WARNING, "Failed migrating from " + fromMember);
+                            logger.log(Level.WARNING, "Failed migrating from " + fromMember, e);
                         }
                     } else {
                         // Partition is lost! Assign new owner and exit.
                         result = Boolean.TRUE;
                     }
-                    logger.log(Level.FINEST, "Finished Migration : " + migrationRequestTask);
-                    systemLogService.logPartition("Finished Migration : " + migrationRequestTask);
                     if (Boolean.TRUE.equals(result)) {
+                        logger.log(Level.FINEST, "Finished Migration : " + migrationRequestTask);
+                        systemLogService.logPartition("Finished Migration : " + migrationRequestTask);
                         concurrentMapManager.enqueueAndWait(new ProcessMigrationResult(migrationRequestTask), 10000);
                     } else {
                         // remove active partition migration

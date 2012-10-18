@@ -131,7 +131,9 @@
     </xs:element>
     <xs:element name="initial-permits" default="0">
         <xs:simpleType>
-            <xs:restriction base="xs:integer"/>
+            <xs:restriction base="xs:int">
+                <xs:minInclusive value="0"/>
+            </xs:restriction>
         </xs:simpleType>
     </xs:element>
     <xs:element name="semaphore-factory">
@@ -147,6 +149,7 @@
             <xs:sequence>
                 <xs:element ref="public-address" minOccurs="0" maxOccurs="1"/>
                 <xs:element ref="port" minOccurs="0" maxOccurs="1"/>
+                <xs:element ref="outbound-ports" minOccurs="0" maxOccurs="1"/>
                 <xs:element ref="join" minOccurs="0" maxOccurs="1"/>
                 <xs:element ref="interfaces" minOccurs="0" maxOccurs="1"/>
                 <xs:element ref="ssl" minOccurs="0" maxOccurs="1"/>
@@ -166,7 +169,9 @@
             </xs:documentation>
         </xs:annotation>
         <xs:simpleType>
-            <xs:restriction base="xs:byte"/>
+            <xs:restriction base="xs:int">
+                <xs:minInclusive value="0"/>
+            </xs:restriction>
         </xs:simpleType>
     </xs:element>
     <xs:element name="max-idle-seconds" default="0">
@@ -179,7 +184,9 @@
             </xs:documentation>
         </xs:annotation>
         <xs:simpleType>
-            <xs:restriction base="xs:byte"/>
+            <xs:restriction base="xs:int">
+                <xs:minInclusive value="0"/>
+            </xs:restriction>
         </xs:simpleType>
     </xs:element>
     <xs:element name="tcp-ip">
@@ -249,6 +256,18 @@
         </xs:complexType>
     </xs:element>
     <xs:element name="public-address">
+        <xs:simpleType>
+            <xs:restriction base="xs:string"/>
+        </xs:simpleType>
+    </xs:element>
+    <xs:element name="outbound-ports">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element ref="ports" minOccurs="0" maxOccurs="unbounded" />
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+    <xs:element name="ports">
         <xs:simpleType>
             <xs:restriction base="xs:string"/>
         </xs:simpleType>
@@ -453,7 +472,9 @@
             </xs:documentation>
         </xs:annotation>
         <xs:simpleType>
-            <xs:restriction base="xs:byte"/>
+            <xs:restriction base="xs:short">
+                <xs:minInclusive value="0"/>
+            </xs:restriction>
         </xs:simpleType>
     </xs:element>
     <xs:element name="keyPassword">
@@ -478,7 +499,9 @@
     </xs:element>
     <xs:element name="keep-alive-seconds" default="60">
         <xs:simpleType>
-            <xs:restriction base="xs:byte"/>
+            <xs:restriction base="xs:int">
+                <xs:minInclusive value="0"/>
+            </xs:restriction>
         </xs:simpleType>
     </xs:element>
     <xs:element name="join">
@@ -497,7 +520,9 @@
             </xs:documentation>
         </xs:annotation>
         <xs:simpleType>
-            <xs:restriction base="xs:byte"/>
+            <xs:restriction base="xs:byte">
+                <xs:minInclusive value="0"/>
+            </xs:restriction>
         </xs:simpleType>
     </xs:element>
     <xs:element name="interfaces">
@@ -654,7 +679,9 @@
     </xs:element>
     <xs:element name="core-pool-size" default="16">
         <xs:simpleType>
-            <xs:restriction base="xs:byte"/>
+            <xs:restriction base="xs:short">
+                <xs:minInclusive value="0"/>
+            </xs:restriction>
         </xs:simpleType>
     </xs:element>
     <xs:element name="backup-count" default="1">
